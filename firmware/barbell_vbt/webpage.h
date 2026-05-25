@@ -245,38 +245,44 @@ const char index_html[] PROGMEM = R"rawliteral(
         }
 
         let lastRepCount = 0;
-        function updateData() {
-            fetch('/data')
-                .then(r => r.json())
-                .then(data => {
-                    const velEl = document.getElementById('vel');
-                    velEl.innerText = data.v.toFixed(2);
-                    
-                    // Color code live velocity
-                    if (data.v > 0.05) velEl.style.color = 'var(--concentric)';
-                    else if (data.v < -0.05) velEl.style.color = 'var(--eccentric)';
-                    else velEl.style.color = 'var(--text-main)';
 
-                    // Badge status
-                    const badge = document.getElementById('stateBadge');
-                    badge.innerText = states[data.s] || "UNKNOWN";
-                    if (data.s === 1 || data.s === 3) badge.classList.add('state-active');
-                    else badge.classList.remove('state-active');
+        // Establish Real-Time Server-Sent Events (SSE) stream
+        const eventSource = new EventSource('/events');
 
-                    // Rep logic within set
-                    if (data.r > lastRepCount) {
-                        currentReps++;
-                        document.getElementById('reps').innerText = currentReps;
-                        lastPeak = data.p;
-                        document.getElementById('peak').innerText = lastPeak.toFixed(2);
-                        lastRepCount = data.r;
-                        
-                        // Fetch graph profile when rep finishes
-                        fetchProfile();
-                    }
-                })
-                .catch(e => console.error(e));
-        }
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            const velEl = document.getElementById('vel');
+            velEl.innerText = data.v.toFixed(2);
+            
+            // Color code live velocity
+            if (data.v > 0.05) velEl.style.color = 'var(--concentric)';
+            else if (data.v < -0.05) velEl.style.color = 'var(--eccentric)';
+            else velEl.style.color = 'var(--text-main)';
+
+            // Badge status
+            const badge = document.getElementById('stateBadge');
+            badge.innerText = states[data.s] || "UNKNOWN";
+            if (data.s === 1 || data.s === 3) badge.classList.add('state-active');
+            else badge.classList.remove('state-active');
+
+            // Rep logic within set
+            if (data.r > lastRepCount) {
+                currentReps++;
+                document.getElementById('reps').innerText = currentReps;
+                lastPeak = data.p;
+                document.getElementById('peak').innerText = lastPeak.toFixed(2);
+                lastRepCount = data.r;
+                
+                // Fetch graph profile when rep finishes
+                fetchProfile();
+            }
+        };
+
+        eventSource.onerror = function(e) {
+            console.error("SSE connection lost. EventSource reconnecting automatically...");
+            document.getElementById('stateBadge').innerText = "DISCONNECTED";
+            document.getElementById('stateBadge').classList.remove('state-active');
+        };
 
         function fetchProfile() {
             fetch('/rep_profile')
@@ -341,7 +347,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         // Initial setup
         setTimeout(resizeCanvas, 100);
         renderHistory();
-        setInterval(updateData, 100);
     </script>
 </body>
 </html>

@@ -111,6 +111,137 @@ uint32_t warmup_samples = 0;
 const uint32_t WARMUP_PERIOD = 200; // 200 samples = 2 seconds at 100Hz
 
 
+// ─── SSE and WebServer Core 0 Handling ───────────────────────────────
+void handleSSE() {
+    WiFiClient client = server.client();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/event-stream");
+    client.println("Cache-Control: no-cache");
+    client.println("Connection: keep-alive");
+    client.println("Access-Control-Allow-Origin: *");
+    client.println();
+    client.flush();
+    
+    // Lock mutex before modifying shared vector
+    if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        sseClients.push_back(client);
+        xSemaphoreGive(sharedMetricsMutex);
+        Serial.println("[SSE] New client connected");
+    }
+}
+
+void broadcastEvent(const char* data) {
+    if (sseClients.empty()) return;
+    
+    auto it = sseClients.begin();
+    while (it != sseClients.end()) {
+        if (it->connected()) {
+            it->printf("data: %s\n\n", data);
+            it->flush();
+            ++it;
+        } else {
+            it->stop();
+            it = sseClients.erase(it);
+            Serial.println("[SSE] Client disconnected");
+        }
+    }
+}
+
+void webServerTask(void *pvParameters) {
+    Serial.println("[WIFI] Starting Access Point: Barbell_VBT");
+    WiFi.softAP("Barbell_VBT"); // Open network
+    Serial.print("[WIFI] Connect to AP and visit: http://");
+    Serial.println(WiFi.softAPIP());
+
+    server.on("/", HTTP_GET, []() {
+        server.send(200, "text/html", index_html);
+    });
+
+    server.on("/data", HTTP_GET, []() {
+        char json[128];
+        if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            snprintf(json, sizeof(json), "{\"v\":%.3f,\"r\":%lu,\"s\":%d,\"p\":%.3f}", 
+                sharedMetrics.velocity, sharedMetrics.rep_count, sharedMetrics.state, sharedMetrics.peak_velocity);
+            xSemaphoreGive(sharedMetricsMutex);
+        } else {
+            snprintf(json, sizeof(json), "{\"v\":0.0,\"r\":0,\"s\":0,\"p\":0.0}");
+        }
+        server.send(200, "application/json", json);
+    });
+
+    server.on("/events", HTTP_GET, handleSSE);
+
+    server.on("/calibrate", HTTP_POST, []() {
+        if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            imu.calibrate(500);
+            timer.reset();
+            xSemaphoreGive(sharedMetricsMutex);
+            server.send(200, "text/plain", "OK");
+        } else {
+            server.send(503, "text/plain", "Busy");
+        }
+    });
+
+    server.on("/set_mode", HTTP_POST, []() {
+        if (server.hasArg("mode")) {
+            int mode = server.arg("mode").toInt();
+            if (mode >= 0 && mode <= 2) {
+                if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    rep_engine.setMode((LiftMode)mode);
+                    xSemaphoreGive(sharedMetricsMutex);
+                    server.send(200, "text/plain", "Mode updated");
+                    return;
+                }
+            }
+        }
+        server.send(400, "text/plain", "Invalid mode");
+    });
+
+    server.on("/rep_profile", HTTP_GET, []() {
+        String json = "[";
+        if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            const DataPoint* profile = rep_engine.getProfile();
+            uint16_t count = rep_engine.getProfileCount();
+            for (uint16_t i = 0; i < count; i++) {
+                json += "[";
+                json += String(profile[i].position, 3);
+                json += ",";
+                json += String(profile[i].velocity, 3);
+                json += "]";
+                if (i < count - 1) json += ",";
+            }
+            xSemaphoreGive(sharedMetricsMutex);
+        }
+        json += "]";
+        server.send(200, "application/json", json);
+    });
+
+    server.begin();
+    Serial.println("[WIFI] HTTP server started on port 80");
+
+    uint32_t lastBroadCast = 0;
+
+    while (true) {
+        server.handleClient();
+
+        // Broadcast telemetry to SSE clients at 25Hz (every 40ms)
+        uint32_t now = millis();
+        if (now - lastBroadCast >= 40) {
+            lastBroadCast = now;
+            if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                if (!sseClients.empty()) {
+                    char json[128];
+                    snprintf(json, sizeof(json), "{\"v\":%.3f,\"r\":%lu,\"s\":%d,\"p\":%.3f}", 
+                        sharedMetrics.velocity, sharedMetrics.rep_count, sharedMetrics.state, sharedMetrics.peak_velocity);
+                    broadcastEvent(json);
+                }
+                xSemaphoreGive(sharedMetricsMutex);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // SETUP
 // ═════════════════════════════════════════════════════════════════════
@@ -179,60 +310,29 @@ void setup() {
     lastStatsTime   = millis();
     lastSensorCheck = millis();
 
-    // ─── Setup WiFi Access Point & WebServer ─────────────────────
-    Serial.println("[WIFI] Starting Access Point: Barbell_VBT");
-    WiFi.softAP("Barbell_VBT"); // Open network
-    Serial.print("[WIFI] Connect to AP and visit: http://");
-    Serial.println(WiFi.softAPIP());
+    // Create FreeRTOS Mutex before spawning the WebServer task
+    sharedMetricsMutex = xSemaphoreCreateMutex();
+    if (sharedMetricsMutex != NULL) {
+        sharedMetrics.velocity = 0.0f;
+        sharedMetrics.position = 0.0f;
+        sharedMetrics.rep_count = 0;
+        sharedMetrics.state = 0;
+        sharedMetrics.peak_velocity = 0.0f;
 
-    server.on("/", HTTP_GET, []() {
-        server.send(200, "text/html", index_html);
-    });
-
-    server.on("/data", HTTP_GET, []() {
-        char json[128];
-        snprintf(json, sizeof(json), "{\"v\":%.3f,\"r\":%lu,\"s\":%d,\"p\":%.3f}", 
-            velocity, rep_engine.getLastRep().rep_count, (int)rep_engine.getState(), rep_engine.getLastRep().peak_velocity);
-        server.send(200, "application/json", json);
-    });
-
-    server.on("/calibrate", HTTP_POST, []() {
-        imu.calibrate(500);
-        timer.reset();
-        server.send(200, "text/plain", "OK");
-    });
-
-    server.on("/set_mode", HTTP_POST, []() {
-        if (server.hasArg("mode")) {
-            int mode = server.arg("mode").toInt();
-            if (mode >= 0 && mode <= 2) {
-                rep_engine.setMode((LiftMode)mode);
-                server.send(200, "text/plain", "Mode updated");
-                return;
-            }
-        }
-        server.send(400, "text/plain", "Invalid mode");
-    });
-
-    server.on("/rep_profile", HTTP_GET, []() {
-        // Build a JSON array of [position, velocity] tuples
-        String json = "[";
-        const DataPoint* profile = rep_engine.getProfile();
-        uint16_t count = rep_engine.getProfileCount();
-        for (uint16_t i = 0; i < count; i++) {
-            json += "[";
-            json += String(profile[i].position, 3);
-            json += ",";
-            json += String(profile[i].velocity, 3);
-            json += "]";
-            if (i < count - 1) json += ",";
-        }
-        json += "]";
-        server.send(200, "application/json", json);
-    });
-
-    server.begin();
-    Serial.println("[WIFI] HTTP server started on port 80");
+        // Spawn WebServer task on Core 0 (WebServerTask, 8KB stack, priority 1)
+        xTaskCreatePinnedToCore(
+            webServerTask,
+            "WebServerTask",
+            8192,
+            NULL,
+            1,
+            NULL,
+            0 // Pin to Core 0
+        );
+        Serial.println("[INIT] WebServer and WiFi AP successfully offloaded to Core 0");
+    } else {
+        Serial.println("[INIT] ERROR: Failed to create thread synchronization mutex!");
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -246,8 +346,11 @@ void loop() {
     if (Serial.available()) {
         char cmd = Serial.read();
         if (cmd == 'c' || cmd == 'C') {
-            imu.calibrate(500); // Take 500 samples (5 seconds at 100Hz)
-            timer.reset();      // Reset timer so deltaTime doesn't spike
+            if (xSemaphoreTake(sharedMetricsMutex, portMAX_DELAY) == pdTRUE) {
+                imu.calibrate(500); // Take 500 samples (5 seconds at 100Hz)
+                timer.reset();      // Reset timer so deltaTime doesn't spike
+                xSemaphoreGive(sharedMetricsMutex);
+            }
         }
     }
 
@@ -259,196 +362,206 @@ void loop() {
                 MPU6500::dataReadyFlag = true; // Force flag to recover
             }
         }
-        server.handleClient(); // Handle web requests while waiting
         return;  // No new data — exit loop immediately
     }
 
-    // Clear the interrupt flag
-    imu.clearDataReady();
+    if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        // Clear the interrupt flag
+        imu.clearDataReady();
 
-    // Update timing
-    timer.update();
-    float dt = timer.getDeltaTime();
+        // Update timing
+        timer.update();
+        float dt = timer.getDeltaTime();
 
-    // Read and scale sensor data
-    MPU6500ScaledData data;
-    imu.readScaledData(&data);
+        // Read and scale sensor data
+        MPU6500ScaledData data;
+        imu.readScaledData(&data);
 
-    // Also clear the hardware interrupt status register
-    imu.readIntStatus();
+        // Also clear the hardware interrupt status register
+        imu.readIntStatus();
 
-    // ─── Warmup counter ─────────────────────────────────────────
-    if (warmup_samples < WARMUP_PERIOD) {
-        warmup_samples++;
-        // During warmup keep beta HIGH so orientation converges rapidly
-        filter.setBeta(0.5f);
-    }
+        // ─── Warmup counter ─────────────────────────────────────────
+        if (warmup_samples < WARMUP_PERIOD) {
+            warmup_samples++;
+            // During warmup keep beta HIGH so orientation converges rapidly
+            filter.setBeta(0.5f);
+        }
 
-    // ─── Phase 3 & 4: Orientation and Gravity Compensation ───────
-    // Update Madgwick filter with scaled data
-    filter.updateIMU(data.gyro_x, data.gyro_y, data.gyro_z, 
-                     data.accel_x, data.accel_y, data.accel_z);
-                     
-    float q0, q1, q2, q3;
-    filter.getQuaternion(&q0, &q1, &q2, &q3);
-    
-    // Calculate expected gravity vector in sensor frame
-    // Assume Earth gravity vector is [0, 0, 9.80665]
-    float gx = 2.0f * (q1 * q3 - q0 * q2) * GRAVITY_MS2;
-    float gy = 2.0f * (q0 * q1 + q2 * q3) * GRAVITY_MS2;
-    float gz = (q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * GRAVITY_MS2;
-    
-    // Calculate linear acceleration (motion without gravity)
-    float lin_ax = data.accel_x - gx;
-    float lin_ay = data.accel_y - gy;
-    float lin_az = data.accel_z - gz;
-
-    // ─── Phase 7: Motion Axis Selection ──────────────────────────
-    // Per user request, strictly use the sensor's Z-axis (z+ and z-) 
-    // for vertical motion instead of omni-directional gravity projection.
-    // lin_az already has gravity removed by the Madgwick filter.
-    // Positive lin_az = Accelerating UP, Negative lin_az = Accelerating DOWN.
-    float vert_acc_raw = lin_az;
-
-    // ─── Phase 9: ZUPT & Dynamic Bias (Drift Reset) ──────────────
-    // Calculate "Jerk" (change in acceleration) to detect if stationary regardless of offset errors
-    float delta_ax = data.accel_x - prev_ax;
-    float delta_ay = data.accel_y - prev_ay;
-    float delta_az = data.accel_z - prev_az;
-    float jerk_mag = sqrt(delta_ax*delta_ax + delta_ay*delta_ay + delta_az*delta_az);
-    float gyro_mag = sqrt(data.gyro_x*data.gyro_x + data.gyro_y*data.gyro_y + data.gyro_z*data.gyro_z);
-    
-    prev_ax = data.accel_x;
-    prev_ay = data.accel_y;
-    prev_az = data.accel_z;
-
-    // Filter jerk and gyro values using EMA to remove high-frequency noise spikes
-    jerk_ema = jerk_ema * 0.9f + jerk_mag * 0.1f;
-    gyro_ema = gyro_ema * 0.9f + gyro_mag * 0.1f;
-
-    // Robust stationary detection using smoothed EMA metrics
-    bool is_currently_still = (jerk_ema < 0.20f && gyro_ema < 4.0f);
-
-    if (is_currently_still) {
-        consecutive_stationary_samples++;
+        // ─── Phase 3 & 4: Orientation and Gravity Compensation ───────
+        // Update Madgwick filter with scaled data
+        filter.updateIMU(data.gyro_x, data.gyro_y, data.gyro_z, 
+                         data.accel_x, data.accel_y, data.accel_z);
+                         
+        float q0, q1, q2, q3;
+        filter.getQuaternion(&q0, &q1, &q2, &q3);
         
-        // Dynamically auto-calibrate at boot if resting flat for ~1.5s
-        if (consecutive_stationary_samples >= 150 && !imu.getCalibration().is_calibrated) {
-            Serial.println();
-            Serial.println("[AUTO-CALIBRATION] Stable sensor detected. Calibrating in background...");
-            imu.calibrate(100); // Quick 1-second auto-calibration
-            timer.reset();
-            consecutive_stationary_samples = 0;
-        }
+        // Calculate expected gravity vector in sensor frame
+        // Assume Earth gravity vector is [0, 0, 9.80665]
+        float gx = 2.0f * (q1 * q3 - q0 * q2) * GRAVITY_MS2;
+        float gy = 2.0f * (q0 * q1 + q2 * q3) * GRAVITY_MS2;
+        float gz = (q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * GRAVITY_MS2;
+        
+        // Calculate linear acceleration (motion without gravity)
+        float lin_ax = data.accel_x - gx;
+        float lin_ay = data.accel_y - gy;
+        float lin_az = data.accel_z - gz;
 
-        if (stationary_start_time == 0) {
-            stationary_start_time = timer.getTimestampMs();
-        } else if (timer.getTimestampMs() - stationary_start_time > 150) { 
-            is_stationary = true;
-            // Slowly adjust the dynamic bias to cancel gravity leaks
-            vert_acc_bias = vert_acc_bias * 0.98f + vert_acc_raw * 0.02f;
-        }
-    } else {
-        consecutive_stationary_samples = 0;
-        stationary_start_time = 0;
-        is_stationary = false;
-    }
+        // ─── Phase 7: Motion Axis Selection ──────────────────────────
+        // Per user request, strictly use the sensor's Z-axis (z+ and z-) 
+        // for vertical motion instead of omni-directional gravity projection.
+        // lin_az already has gravity removed by the Madgwick filter.
+        // Positive lin_az = Accelerating UP, Negative lin_az = Accelerating DOWN.
+        float vert_acc_raw = lin_az;
 
-    // Dynamic Beta: set for NEXT sample (only after warmup has finished)
-    if (warmup_samples >= WARMUP_PERIOD) {
-        if (is_stationary) {
-            filter.setBeta(0.25f);
+        // ─── Phase 9: ZUPT & Dynamic Bias (Drift Reset) ──────────────
+        // Calculate "Jerk" (change in acceleration) to detect if stationary regardless of offset errors
+        float delta_ax = data.accel_x - prev_ax;
+        float delta_ay = data.accel_y - prev_ay;
+        float delta_az = data.accel_z - prev_az;
+        float jerk_mag = sqrtf(delta_ax*delta_ax + delta_ay*delta_ay + delta_az*delta_az);
+        float gyro_mag = sqrtf(data.gyro_x*data.gyro_x + data.gyro_y*data.gyro_y + data.gyro_z*data.gyro_z);
+        
+        prev_ax = data.accel_x;
+        prev_ay = data.accel_y;
+        prev_az = data.accel_z;
+
+        // Filter jerk and gyro values using EMA to remove high-frequency noise spikes
+        jerk_ema = jerk_ema * 0.9f + jerk_mag * 0.1f;
+        gyro_ema = gyro_ema * 0.9f + gyro_mag * 0.1f;
+
+        // Robust stationary detection using smoothed EMA metrics
+        bool is_currently_still = (jerk_ema < 0.20f && gyro_ema < 4.0f);
+
+        if (is_currently_still) {
+            consecutive_stationary_samples++;
+            
+            // Dynamically auto-calibrate at boot if resting flat for ~1.5s
+            if (consecutive_stationary_samples >= 150 && !imu.getCalibration().is_calibrated) {
+                Serial.println();
+                Serial.println("[AUTO-CALIBRATION] Stable sensor detected. Calibrating in background...");
+                imu.calibrate(100); // Quick 1-second auto-calibration
+                timer.reset();
+                consecutive_stationary_samples = 0;
+            }
+
+            if (stationary_start_time == 0) {
+                stationary_start_time = timer.getTimestampMs();
+            } else if (timer.getTimestampMs() - stationary_start_time > 150) { 
+                is_stationary = true;
+                // Slowly adjust the dynamic bias to cancel gravity leaks
+                vert_acc_bias = vert_acc_bias * 0.98f + vert_acc_raw * 0.02f;
+            }
         } else {
-            filter.setBeta(0.015f);
+            consecutive_stationary_samples = 0;
+            stationary_start_time = 0;
+            is_stationary = false;
         }
-    }
 
-    // Apply the dynamic bias
-    float vert_acc = vert_acc_raw - vert_acc_bias;
+        // Dynamic Beta: set for NEXT sample (only after warmup has finished)
+        if (warmup_samples >= WARMUP_PERIOD) {
+            if (is_stationary) {
+                filter.setBeta(0.25f);
+            } else {
+                filter.setBeta(0.015f);
+            }
+        }
 
-    // Apply a small acceleration deadband to block noise from integrating into velocity
-    if (fabsf(vert_acc) < 0.05f) {
-        vert_acc = 0.0f;
-    }
+        // Apply the dynamic bias
+        float vert_acc = vert_acc_raw - vert_acc_bias;
 
-    // ─── Phase 8: Velocity Estimation ────────────────────────────
-    if (warmup_samples < WARMUP_PERIOD) {
-        // Still warming up — don't integrate, just track acceleration for bias
-        velocity = 0.0f;
-        position = 0.0f;
-    } else if (is_stationary) {
-        velocity = 0.0f; // Reset drift
-        position = 0.0f; // Reset position baseline between reps
-    } else {
-        // Pure trapezoidal integration
-        velocity += 0.5f * (prev_vert_acc + vert_acc) * dt;
-        position += velocity * dt; // Integrate velocity for position
-        
-        // Safe clamping to prevent runaway velocity integration
-        if (velocity > 3.0f) velocity = 3.0f;
-        else if (velocity < -3.0f) velocity = -3.0f;
-    }
-    prev_vert_acc = vert_acc;
+        // Apply a small acceleration deadband to block noise from integrating into velocity
+        if (fabsf(vert_acc) < 0.05f) {
+            vert_acc = 0.0f;
+        }
 
-    // ─── Stream data as CSV ──────────────────────────────────────
-    Serial.printf("D,%lu,%.3f,%.3f,%d,%d\n",
-        timer.getTimestampMs(),
-        vert_acc,
-        velocity,
-        is_stationary ? 1 : 0,
-        (int)rep_engine.getState()
-    );
+        // ─── Phase 8: Velocity Estimation ────────────────────────────
+        if (warmup_samples < WARMUP_PERIOD) {
+            // Still warming up — don't integrate, just track acceleration for bias
+            velocity = 0.0f;
+            position = 0.0f;
+        } else if (is_stationary) {
+            velocity = 0.0f; // Reset drift
+            position = 0.0f; // Reset position baseline between reps
+        } else {
+            // Pure trapezoidal integration
+            velocity += 0.5f * (prev_vert_acc + vert_acc) * dt;
+            position += velocity * dt; // Integrate velocity for position
+            
+            // Safe clamping to prevent runaway velocity integration
+            if (velocity > 3.0f) velocity = 3.0f;
+            else if (velocity < -3.0f) velocity = -3.0f;
+        }
+        prev_vert_acc = vert_acc;
 
-    // ─── Phase 10 & 11: Rep Detection & Metrics ──────────────────
-    if (rep_engine.update(velocity, position, is_stationary, timer.getTimestampMs())) {
-        RepMetrics rep = rep_engine.getLastRep();
-        Serial.println();
-        Serial.println("==================================================");
-        Serial.printf("  REP %lu COMPLETED!\n", rep.rep_count);
-        Serial.printf("  Peak Velocity  : %.2f m/s\n", rep.peak_velocity);
-        Serial.printf("  Avg Velocity   : %.2f m/s\n", rep.avg_velocity);
-        Serial.printf("  Eccentric Time : %.2f s\n", rep.ecc_time);
-        Serial.printf("  Pause Time     : %.2f s\n", rep.pause_time);
-        Serial.printf("  Concentric Time: %.2f s\n", rep.con_time);
-        Serial.printf("  Total Time     : %.2f s\n", rep.total_time);
-        Serial.println("==================================================");
-        
-        // Machine-readable format
-        Serial.printf("R,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
-            rep.rep_count, rep.peak_velocity, rep.avg_velocity, 
-            rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time);
-        Serial.println();
-    }
+        // ─── Stream data as CSV ──────────────────────────────────────
+        Serial.printf("D,%lu,%.3f,%.3f,%d,%d\n",
+            timer.getTimestampMs(),
+            vert_acc,
+            velocity,
+            is_stationary ? 1 : 0,
+            (int)rep_engine.getState()
+        );
 
-    // ─── Update statistics ───────────────────────────────────────
-    sampleCount++;
-    totalSamples++;
-    sumDeltaTime += dt;
-    if (dt < minDeltaTime && dt > 0.001f) minDeltaTime = dt;
-    if (dt > maxDeltaTime) maxDeltaTime = dt;
+        // ─── Phase 10 & 11: Rep Detection & Metrics ──────────────────
+        if (rep_engine.update(velocity, position, is_stationary, timer.getTimestampMs())) {
+            RepMetrics rep = rep_engine.getLastRep();
+            Serial.println();
+            Serial.println("==================================================");
+            Serial.printf("  REP %lu COMPLETED!\n", rep.rep_count);
+            Serial.printf("  Peak Velocity  : %.2f m/s\n", rep.peak_velocity);
+            Serial.printf("  Avg Velocity   : %.2f m/s\n", rep.avg_velocity);
+            Serial.printf("  Eccentric Time : %.2f s\n", rep.ecc_time);
+            Serial.printf("  Pause Time     : %.2f s\n", rep.pause_time);
+            Serial.printf("  Concentric Time: %.2f s\n", rep.con_time);
+            Serial.printf("  Total Time     : %.2f s\n", rep.total_time);
+            Serial.println("==================================================");
+            
+            // Machine-readable format
+            Serial.printf("R,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+                rep.rep_count, rep.peak_velocity, rep.avg_velocity, 
+                rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time);
+            Serial.println();
+        }
 
-    // ─── Periodic statistics output ──────────────────────────────
-    uint32_t now = millis();
-    if (now - lastStatsTime >= STATS_INTERVAL_MS) {
-        printStats();
-        sampleCount  = 0;
-        minDeltaTime = 999.0f;
-        maxDeltaTime = 0.0f;
-        sumDeltaTime = 0.0f;
-        lastStatsTime = now;
-    }
+        // ─── Update statistics ───────────────────────────────────────
+        sampleCount++;
+        totalSamples++;
+        sumDeltaTime += dt;
+        if (dt < minDeltaTime && dt > 0.001f) minDeltaTime = dt;
+        if (dt > maxDeltaTime) maxDeltaTime = dt;
 
-    // ─── Periodic sensor health check ────────────────────────────
-    if (now - lastSensorCheck >= SENSOR_CHECK_MS) {
-        checkSensorHealth();
-        lastSensorCheck = now;
+        // Update the SharedMetrics structure
+        sharedMetrics.velocity = velocity;
+        sharedMetrics.position = position;
+        sharedMetrics.rep_count = rep_engine.getLastRep().rep_count;
+        sharedMetrics.state = (int)rep_engine.getState();
+        sharedMetrics.peak_velocity = rep_engine.getLastRep().peak_velocity;
+
+        // ─── Periodic statistics output ──────────────────────────────
+        uint32_t now = millis();
+        if (now - lastStatsTime >= STATS_INTERVAL_MS) {
+            printStats();
+            sampleCount  = 0;
+            minDeltaTime = 999.0f;
+            maxDeltaTime = 0.0f;
+            sumDeltaTime = 0.0f;
+            lastStatsTime = now;
+        }
+
+        // ─── Periodic sensor health check ────────────────────────────
+        if (now - lastSensorCheck >= SENSOR_CHECK_MS) {
+            checkSensorHealth();
+            lastSensorCheck = now;
+        }
+
+        // Release the mutex
+        xSemaphoreGive(sharedMetricsMutex);
     }
 }
 
 // ═════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
 // ═════════════════════════════════════════════════════════════════════
-
 void printStats() {
     if (sampleCount == 0) return;
 
