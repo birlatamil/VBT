@@ -60,11 +60,12 @@ public:
         
         if (httpResponseCode > 0) {
             Serial.printf("[Cloud] POST rep - OK (%d)\n", httpResponseCode);
+            String response = http.getString(); // drain buffer to allow keep-alive
         } else {
             Serial.printf("[Cloud] POST rep - Error: %s\n", http.errorToString(httpResponseCode).c_str());
         }
         
-        // Let it keep-alive
+        http.end(); // Free HTTP resources, TCP connection stays open in wifiClient
     }
 
     void postHeartbeat(float velocity, int state) {
@@ -81,7 +82,10 @@ public:
         http.setTimeout(500); // Quick timeout for heartbeat
         
         int httpResponseCode = http.POST(payload);
-        // Let it keep-alive
+        if (httpResponseCode > 0) {
+            String response = http.getString(); // drain buffer
+        }
+        http.end();
     }
 };
 
