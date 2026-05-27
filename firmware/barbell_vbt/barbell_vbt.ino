@@ -50,6 +50,9 @@
 #include <WebServer.h>
 #include "webpage.h"
 #include <vector>
+#include "cloud_client.h"
+
+CloudClient cloud;
 
 // ─── Configuration ───────────────────────────────────────────────────
 #define SERIAL_BAUD            115200   // Ignored for native USB CDC, kept for fallback
@@ -263,6 +266,9 @@ void setup() {
     // Initialize MPU6500
     Serial.println("[INIT] Initializing MPU6500 over SPI...");
     sensorOk = imu.begin();
+
+    // Initialize Cloud Connection (WiFi STA)
+    cloud.begin();
 
     if (!sensorOk) {
         Serial.println();
@@ -521,6 +527,13 @@ void loop() {
                 rep.rep_count, rep.peak_velocity, rep.avg_velocity, 
                 rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time);
             Serial.println();
+
+            // Cloud sync
+            String modeStr = "squat";
+            if (rep_engine.getMode() == LIFT_BENCH) modeStr = "bench";
+            else if (rep_engine.getMode() == LIFT_DEADLIFT) modeStr = "deadlift";
+            
+            cloud.postRepData(modeStr.c_str(), rep.rep_count, rep.avg_velocity, rep.peak_velocity, rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time, (int)rep_engine.getState());
         }
 
         // ─── Update statistics ───────────────────────────────────────
@@ -546,6 +559,13 @@ void loop() {
             maxDeltaTime = 0.0f;
             sumDeltaTime = 0.0f;
             lastStatsTime = now;
+        }
+
+        // ─── Periodic Heartbeat for Cloud Dashboard (every 2s) ───────
+        static uint32_t lastHeartbeat = 0;
+        if (now - lastHeartbeat >= 2000) {
+            cloud.postHeartbeat(velocity, (int)rep_engine.getState());
+            lastHeartbeat = now;
         }
 
         // ─── Periodic sensor health check ────────────────────────────
