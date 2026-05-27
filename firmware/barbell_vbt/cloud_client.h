@@ -12,6 +12,11 @@
 #define DEVICE_ID "esp32_001"
 
 class CloudClient {
+private:
+    WiFiClient wifiClient;
+    HTTPClient http;
+    String url;
+
 public:
     CloudClient() {}
 
@@ -32,6 +37,8 @@ public:
             Serial.println("\n[Cloud] Connected!");
             Serial.print("[Cloud] IP Address: ");
             Serial.println(WiFi.localIP());
+            url = String(BACKEND_URL) + "/api/ingest";
+            http.setReuse(true);
         } else {
             Serial.println("\n[Cloud] Failed to connect. Will retry automatically.");
         }
@@ -40,16 +47,12 @@ public:
     void postRepData(const char* exercise, uint32_t rep_count, float avg_v, float peak_v, float ecc_t, float pause_t, float con_t, float tot_t, int state) {
         if (WiFi.status() != WL_CONNECTED) return;
 
-        HTTPClient http;
-        String url = String(BACKEND_URL) + "/api/ingest";
-        
-        // Build JSON payload
         char payload[512];
         snprintf(payload, sizeof(payload), 
             "{\"device_id\":\"%s\",\"type\":\"rep\",\"exercise\":\"%s\",\"rep\":%lu,\"avg_velocity\":%.3f,\"peak_velocity\":%.3f,\"ecc_time\":%.2f,\"pause_time\":%.2f,\"con_time\":%.2f,\"total_time\":%.2f,\"state\":%d,\"timestamp\":%lu}",
             DEVICE_ID, exercise, rep_count, avg_v, peak_v, ecc_t, pause_t, con_t, tot_t, state, millis());
 
-        http.begin(url);
+        http.begin(wifiClient, url);
         http.addHeader("Content-Type", "application/json");
         http.setTimeout(1500); // 1.5s timeout to avoid blocking loop too long
         
@@ -61,26 +64,24 @@ public:
             Serial.printf("[Cloud] POST rep - Error: %s\n", http.errorToString(httpResponseCode).c_str());
         }
         
-        http.end();
+        // Let it keep-alive
     }
 
     void postHeartbeat(float velocity, int state) {
         if (WiFi.status() != WL_CONNECTED) return;
 
-        HTTPClient http;
-        String url = String(BACKEND_URL) + "/api/ingest";
-        
         char payload[128];
         snprintf(payload, sizeof(payload), 
             "{\"device_id\":\"%s\",\"type\":\"heartbeat\",\"velocity\":%.3f,\"state\":%d,\"timestamp\":%lu}",
             DEVICE_ID, velocity, state, millis());
 
-        http.begin(url);
+        http.begin(wifiClient, url);
         http.addHeader("Content-Type", "application/json");
+        http.addHeader("Connection", "keep-alive"); // Explicit keep-alive
         http.setTimeout(500); // Quick timeout for heartbeat
         
         int httpResponseCode = http.POST(payload);
-        http.end();
+        // Let it keep-alive
     }
 };
 
