@@ -6,8 +6,8 @@
 #include <HTTPClient.h>
 
 // User: Configure these for your environment
-#define WIFI_STA_SSID "YOUR_WIFI_SSID"
-#define WIFI_STA_PASS "YOUR_WIFI_PASSWORD"
+#define WIFI_STA_SSID "HAZZARD-2.4G"
+#define WIFI_STA_PASS "07112016"
 #define BACKEND_URL "http://192.168.1.X:3001" // Replace with your Node.js backend IP
 #define DEVICE_ID "esp32_001"
 
