@@ -8,7 +8,7 @@
 #include "rep_detector.h"
 
 // User: Configure your default backend URL here (update before flashing if needed)
-#define DEFAULT_BACKEND_URL "https://vbt-n350.onrender.com"
+#define DEFAULT_BACKEND_URL "http://192.168.1.36:3001"
 #define DEVICE_ID "esp32_001"
 
 class CloudClient {
