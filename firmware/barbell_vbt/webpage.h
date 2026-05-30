@@ -352,4 +352,32 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+const char wifi_config_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VBT PRO - WiFi Setup</title>
+    <style>
+        body { background: #020617; color: #f8fafc; font-family: sans-serif; padding: 20px; text-align: center; }
+        .card { background: #0f172a; padding: 20px; border-radius: 12px; max-width: 400px; margin: 0 auto; border: 1px solid #1e293b; }
+        input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: none; background: #334155; color: white; font-size: 1rem; box-sizing: border-box; }
+        button { width: 100%; padding: 15px; border: none; border-radius: 8px; background: #38bdf8; color: black; font-size: 1.1rem; font-weight: bold; cursor: pointer; margin-top: 10px; }
+        h2 { margin-top: 0; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>WiFi & Backend Setup</h2>
+        <form action="/save_wifi" method="POST">
+            <input type="text" name="ssid" placeholder="WiFi SSID" required>
+            <input type="password" name="pass" placeholder="WiFi Password" required>
+            <input type="url" name="backend" placeholder="Backend URL (Render)">
+            <button type="submit">SAVE & RESTART</button>
+        </form>
+    </div>
+</body>
+</html>
+)rawliteral";
+
 #endif

@@ -4,11 +4,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 
-// User: Configure these for your environment
-#define WIFI_STA_SSID "HAZZARD-2.4G"
-#define WIFI_STA_PASS "07112016"
-#define BACKEND_URL "http://192.168.1.33:3001" // Updated with current local IP
+// User: Configure your default backend URL here (update before flashing if needed)
+#define DEFAULT_BACKEND_URL "https://your-render-app.onrender.com"
 #define DEVICE_ID "esp32_001"
 
 class CloudClient {
@@ -17,14 +16,37 @@ private:
     HTTPClient http;
     String url;
 
+    Preferences preferences;
+
 public:
     CloudClient() {}
 
+    void saveWiFiConfig(String ssid, String pass, String backend) {
+        preferences.begin("vbt_config", false);
+        preferences.putString("ssid", ssid);
+        preferences.putString("pass", pass);
+        if (backend.length() > 0) {
+            preferences.putString("backend", backend);
+        }
+        preferences.end();
+    }
+
     void begin() {
+        preferences.begin("vbt_config", true);
+        String ssid = preferences.getString("ssid", "");
+        String pass = preferences.getString("pass", "");
+        String savedBackend = preferences.getString("backend", DEFAULT_BACKEND_URL);
+        preferences.end();
+
+        if (ssid == "") {
+            Serial.println("[Cloud] No WiFi credentials saved. Please configure via Access Point.");
+            return;
+        }
+
         Serial.print("[Cloud] Connecting to WiFi STA: ");
-        Serial.println(WIFI_STA_SSID);
+        Serial.println(ssid);
         
-        WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
+        WiFi.begin(ssid.c_str(), pass.c_str());
         
         // Non-blocking wait for up to 10 seconds
         uint32_t startAttemptTime = millis();
@@ -37,7 +59,7 @@ public:
             Serial.println("\n[Cloud] Connected!");
             Serial.print("[Cloud] IP Address: ");
             Serial.println(WiFi.localIP());
-            url = String(BACKEND_URL) + "/api/ingest";
+            url = savedBackend + "/api/ingest";
             http.setReuse(true);
         } else {
             Serial.println("\n[Cloud] Failed to connect. Will retry automatically.");

@@ -219,6 +219,22 @@ void webServerTask(void *pvParameters) {
         server.send(200, "application/json", json);
     });
 
+    server.on("/wifi", HTTP_GET, []() {
+        server.send(200, "text/html", wifi_config_html);
+    });
+
+    server.on("/save_wifi", HTTP_POST, []() {
+        String ssid = server.arg("ssid");
+        String pass = server.arg("pass");
+        String backend = server.arg("backend");
+        
+        cloud.saveWiFiConfig(ssid, pass, backend);
+        
+        server.send(200, "text/html", "<h2>Saved! Restarting ESP32...</h2><p>Please wait 5 seconds, then connect to your configured WiFi.</p>");
+        delay(1000);
+        ESP.restart();
+    });
+
     server.begin();
     Serial.println("[WIFI] HTTP server started on port 80");
 
