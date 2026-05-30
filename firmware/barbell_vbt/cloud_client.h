@@ -5,9 +5,10 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include "rep_detector.h"
 
 // User: Configure your default backend URL here (update before flashing if needed)
-#define DEFAULT_BACKEND_URL "https://your-render-app.onrender.com"
+#define DEFAULT_BACKEND_URL "https://vbt-n350.onrender.com"
 #define DEVICE_ID "esp32_001"
 
 class CloudClient {
@@ -46,6 +47,9 @@ public:
         Serial.print("[Cloud] Connecting to WiFi STA: ");
         Serial.println(ssid);
         
+        WiFi.mode(WIFI_STA);
+        WiFi.disconnect();
+        delay(100);
         WiFi.begin(ssid.c_str(), pass.c_str());
         
         // Non-blocking wait for up to 10 seconds
@@ -66,13 +70,26 @@ public:
         }
     }
 
-    void postRepData(const char* exercise, uint32_t rep_count, float avg_v, float peak_v, float ecc_t, float pause_t, float con_t, float tot_t, int state) {
+    void postRepData(const char* exercise, uint32_t rep_count, float avg_v, float peak_v, float ecc_t, float pause_t, float con_t, float tot_t, int state, const DataPoint* profile, uint16_t profile_count) {
         if (WiFi.status() != WL_CONNECTED) return;
 
-        char payload[512];
-        snprintf(payload, sizeof(payload), 
-            "{\"device_id\":\"%s\",\"type\":\"rep\",\"exercise\":\"%s\",\"rep\":%lu,\"avg_velocity\":%.3f,\"peak_velocity\":%.3f,\"ecc_time\":%.2f,\"pause_time\":%.2f,\"con_time\":%.2f,\"total_time\":%.2f,\"state\":%d,\"timestamp\":%lu}",
+        String payload;
+        payload.reserve(8192); // Enough space for up to 500 velocity floats
+
+        char basePayload[512];
+        snprintf(basePayload, sizeof(basePayload), 
+            "{\"device_id\":\"%s\",\"type\":\"rep\",\"exercise\":\"%s\",\"rep\":%lu,\"avg_velocity\":%.3f,\"peak_velocity\":%.3f,\"ecc_time\":%.2f,\"pause_time\":%.2f,\"con_time\":%.2f,\"total_time\":%.2f,\"state\":%d,\"timestamp\":%lu,\"profile\":[",
             DEVICE_ID, exercise, rep_count, avg_v, peak_v, ecc_t, pause_t, con_t, tot_t, state, millis());
+
+        payload = basePayload;
+
+        for (uint16_t i = 0; i < profile_count; i++) {
+            payload += String(profile[i].velocity, 3);
+            if (i < profile_count - 1) {
+                payload += ",";
+            }
+        }
+        payload += "]}";
 
         http.begin(wifiClient, url);
         http.addHeader("Content-Type", "application/json");

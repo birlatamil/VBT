@@ -242,22 +242,7 @@ void webServerTask(void *pvParameters) {
 
     while (true) {
         server.handleClient();
-
-        // Broadcast telemetry to SSE clients at 25Hz (every 40ms)
-        uint32_t now = millis();
-        if (now - lastBroadCast >= 40) {
-            lastBroadCast = now;
-            if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                if (!sseClients.empty()) {
-                    char json[128];
-                    snprintf(json, sizeof(json), "{\"v\":%.3f,\"r\":%lu,\"s\":%d,\"p\":%.3f}", 
-                        sharedMetrics.velocity, sharedMetrics.rep_count, sharedMetrics.state, sharedMetrics.peak_velocity);
-                    broadcastEvent(json);
-                }
-                xSemaphoreGive(sharedMetricsMutex);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -549,7 +534,7 @@ void loop() {
             if (rep_engine.getMode() == LIFT_BENCH) modeStr = "bench";
             else if (rep_engine.getMode() == LIFT_DEADLIFT) modeStr = "deadlift";
             
-            cloud.postRepData(modeStr.c_str(), rep.rep_count, rep.avg_velocity, rep.peak_velocity, rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time, (int)rep_engine.getState());
+            cloud.postRepData(modeStr.c_str(), rep.rep_count, rep.avg_velocity, rep.peak_velocity, rep.ecc_time, rep.pause_time, rep.con_time, rep.total_time, (int)rep_engine.getState(), rep_engine.getProfile(), rep_engine.getProfileCount());
         }
 
         // ─── Update statistics ───────────────────────────────────────

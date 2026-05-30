@@ -10,6 +10,7 @@ export const useSessionStore = create((set, get) => ({
   projectedRpe: 0,
   velocityLossPct: 0,
   insights: [],
+  latestRepProfile: [],
   connectionStatus: 'disconnected', // 'connected' | 'disconnected'
   espConnectionStatus: 'disconnected', // 'connected' | 'disconnected'
   espTimeout: null,
@@ -46,18 +47,20 @@ export const useSessionStore = create((set, get) => ({
       reps: [...reps, rep],
       projectedRpe: stats.projected_rpe,
       velocityLossPct: stats.velocity_loss_pct,
+      latestRepProfile: rep.profile || [],
       espConnectionStatus: 'connected',
       espTimeout: newTimeout
     });
   },
   
-  resetSet: () => set({ reps: [], projectedRpe: 0, velocityLossPct: 0, insights: [] }),
+  resetSet: () => set({ reps: [], projectedRpe: 0, velocityLossPct: 0, insights: [], latestRepProfile: [] }),
   
   endSession: (summary) => set({ 
     sessionStatus: 'idle', 
     reps: [],
     projectedRpe: 0,
     velocityLossPct: 0,
+    latestRepProfile: [],
     insights: summary.insights
   }),
 }));

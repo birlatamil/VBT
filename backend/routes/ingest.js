@@ -36,7 +36,7 @@ module.exports = (io) => {
       // Broadcast to frontend
       io.emit('rep:live', {
         device_id: data.device_id,
-        rep: savedRep,
+        rep: { ...savedRep, profile: data.profile || [] },
         session_stats: {
           total_reps: session.reps.length,
           velocity_loss_pct: vLoss,
@@ -52,7 +52,7 @@ module.exports = (io) => {
       io.emit('session:updated', { status: 'started', session: newSession });
       io.emit('rep:live', {
         device_id: data.device_id,
-        rep: savedRep,
+        rep: { ...savedRep, profile: data.profile || [] },
         session_stats: { total_reps: 1, velocity_loss_pct: 0, projected_rpe: 6 }
       });
     }
