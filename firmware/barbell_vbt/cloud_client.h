@@ -173,6 +173,7 @@ private:
         return false;
     }
 
+public:
     CloudClient() {}
 
     // ── Persist WiFi config via Web UI ──────────────────────────────────
