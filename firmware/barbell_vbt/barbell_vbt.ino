@@ -47,6 +47,7 @@
 #include "MadgwickAHRS.h"
 #include "rep_detector.h"
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include "webpage.h"
 #include <vector>
@@ -237,6 +238,13 @@ void webServerTask(void *pvParameters) {
 
     server.begin();
     Serial.println("[WIFI] HTTP server started on port 80");
+
+    if (MDNS.begin("vbt")) {
+        Serial.println("[WIFI] mDNS responder started. You can now access: http://vbt.local");
+        MDNS.addService("http", "tcp", 80);
+    } else {
+        Serial.println("[WIFI] Error setting up mDNS responder!");
+    }
 
     uint32_t lastBroadCast = 0;
 
