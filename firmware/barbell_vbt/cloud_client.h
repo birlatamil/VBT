@@ -18,6 +18,11 @@
 // Per-attempt connection timeout (ms) — must be << WDT timeout
 #define WIFI_CONNECT_TIMEOUT_MS  12000
 
+struct CloudMessage {
+    char* payload;
+    bool isHeartbeat;
+};
+
 class CloudClient {
 private:
     WiFiClient wifiClient;
@@ -31,6 +36,54 @@ private:
     uint32_t _lastRetryMs = 0;   // millis() of last reconnect attempt
 
     Preferences preferences;
+
+    QueueHandle_t _cloudQueue;
+
+    static void _cloudTaskFunc(void* pvParameters) {
+        CloudClient* instance = (CloudClient*)pvParameters;
+        instance->_taskLoop();
+    }
+
+    void _taskLoop() {
+        CloudMessage msg;
+        while (true) {
+            // Block until a message is available in the queue
+            if (xQueueReceive(_cloudQueue, &msg, portMAX_DELAY) == pdTRUE) {
+                if (WiFi.status() == WL_CONNECTED && !_backendUrl.isEmpty()) {
+                    String reqUrl = _backendUrl + "/api/ingest";
+                    
+                    bool isHttps = reqUrl.startsWith("https://");
+                    if (isHttps) {
+                        http.begin(secureClient, reqUrl);
+                    } else {
+                        http.begin(wifiClient, reqUrl);
+                    }
+                    
+                    http.addHeader("Content-Type", "application/json");
+                    if (msg.isHeartbeat) {
+                        http.addHeader("Connection", "keep-alive");
+                        http.setTimeout(3000); 
+                    } else {
+                        http.setTimeout(5000);
+                    }
+
+                    int code = http.POST(msg.payload);
+                    if (code == 200) {
+                        if (!msg.isHeartbeat) Serial.printf("[Cloud] POST rep - OK (%d)\n", code);
+                        http.getString(); // drain buffer
+                    } else if (code > 0) {
+                        Serial.printf("[Cloud] %s server error: HTTP %d\n", msg.isHeartbeat ? "Heartbeat" : "POST rep", code);
+                    } else {
+                        Serial.printf("[Cloud] %s connect error: %s\n", msg.isHeartbeat ? "Heartbeat" : "POST rep", http.errorToString(code).c_str());
+                    }
+                    http.end();
+                }
+                
+                // Free the dynamically allocated memory from the main loop
+                free(msg.payload);
+            }
+        }
+    }
 
     // ── Translate disconnect reason to human-readable string ────────────
     static const char* _reasonStr(uint8_t reason) {
@@ -120,7 +173,6 @@ private:
         return false;
     }
 
-public:
     CloudClient() {}
 
     // ── Persist WiFi config via Web UI ──────────────────────────────────
@@ -138,6 +190,11 @@ public:
     // Does NOT call WiFi.mode() — the main sketch owns that.
     // Does NOT add itself to the watchdog — called before WDT is active.
     void begin() {
+        _cloudQueue = xQueueCreate(10, sizeof(CloudMessage));
+        if (_cloudQueue == NULL) {
+            Serial.println("[Cloud] Error: Failed to create FreeRTOS queue");
+        }
+
         preferences.begin("vbt_config", true);
         _ssid          = preferences.getString("ssid",    "");
         _pass          = preferences.getString("pass",    "");
@@ -163,6 +220,17 @@ public:
             Serial.println("[Cloud] Initial connect failed. Will retry every 30s automatically.");
             _lastRetryMs = millis();  // start retry countdown
         }
+
+        // Spawn background task for HTTP POSTs on Core 0
+        xTaskCreatePinnedToCore(
+            _cloudTaskFunc,   /* Task function */
+            "CloudTask",      /* Name of task */
+            8192,             /* Stack size */
+            this,             /* Parameter */
+            1,                /* Priority */
+            NULL,             /* Task handle */
+            0                 /* Core (0 = WiFi/Network core) */
+        );
     }
 
     // ── Call periodically from loop() — non-blocking reconnect ──────────
@@ -209,28 +277,17 @@ public:
         }
         payload += "]}";
 
-        String reqUrl = _backendUrl + "/api/ingest";
-        
-        bool isHttps = reqUrl.startsWith("https://");
-        if (isHttps) {
-            http.begin(secureClient, reqUrl);
-        } else {
-            http.begin(wifiClient, reqUrl);
+        // Allocate memory and push to FreeRTOS queue
+        CloudMessage msg;
+        msg.isHeartbeat = false;
+        msg.payload = (char*)malloc(payload.length() + 1);
+        if (msg.payload != NULL) {
+            strcpy(msg.payload, payload.c_str());
+            if (xQueueSend(_cloudQueue, &msg, 0) != pdTRUE) {
+                Serial.println("[Cloud] Error: Queue full, dropping rep data");
+                free(msg.payload);
+            }
         }
-        
-        http.addHeader("Content-Type", "application/json");
-        http.setTimeout(5000); // 5s timeout: Render free tier can be slow, plus HTTPS overhead
-
-        int code = http.POST(payload);
-        if (code == 200) {
-            Serial.printf("[Cloud] POST rep - OK (%d)\n", code);
-            http.getString(); // drain keep-alive buffer
-        } else if (code > 0) {
-            Serial.printf("[Cloud] POST rep - Server Error: HTTP %d. Response: %s\n", code, http.getString().c_str());
-        } else {
-            Serial.printf("[Cloud] POST rep - Connection Error: %s\n", http.errorToString(code).c_str());
-        }
-        http.end();
     }
 
     // ── Post a heartbeat (every ~2s from loop) ───────────────────────────
@@ -238,34 +295,23 @@ public:
         if (WiFi.status() != WL_CONNECTED) return;
         if (_backendUrl.isEmpty()) return;
 
-        char payload[128];
-        snprintf(payload, sizeof(payload),
+        char payloadBuffer[128];
+        snprintf(payloadBuffer, sizeof(payloadBuffer),
             "{\"device_id\":\"%s\",\"type\":\"heartbeat\","
             "\"velocity\":%.3f,\"state\":%d,\"timestamp\":%lu}",
             DEVICE_ID, velocity, state, millis());
 
-        String reqUrl = _backendUrl + "/api/ingest";
-        
-        bool isHttps = reqUrl.startsWith("https://");
-        if (isHttps) {
-            http.begin(secureClient, reqUrl);
-        } else {
-            http.begin(wifiClient, reqUrl);
+        // Allocate memory and push to FreeRTOS queue
+        CloudMessage msg;
+        msg.isHeartbeat = true;
+        msg.payload = (char*)malloc(strlen(payloadBuffer) + 1);
+        if (msg.payload != NULL) {
+            strcpy(msg.payload, payloadBuffer);
+            // Non-blocking send: if queue is full, drop the heartbeat
+            if (xQueueSend(_cloudQueue, &msg, 0) != pdTRUE) {
+                free(msg.payload);
+            }
         }
-
-        http.addHeader("Content-Type", "application/json");
-        http.addHeader("Connection", "keep-alive");
-        http.setTimeout(3000); // 3s timeout for HTTPS handshakes and slow servers
-
-        int code = http.POST(payload);
-        if (code == 200) {
-            http.getString(); // drain buffer
-        } else if (code > 0) {
-            Serial.printf("[Cloud] Heartbeat server error: HTTP %d\n", code);
-        } else {
-            Serial.printf("[Cloud] Heartbeat connect error: %s\n", http.errorToString(code).c_str());
-        }
-        http.end();
     }
 
     bool isConnected() const { return WiFi.status() == WL_CONNECTED; }
