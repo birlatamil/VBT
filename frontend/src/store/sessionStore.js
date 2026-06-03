@@ -19,39 +19,41 @@ export const useSessionStore = create((set, get) => ({
   setExercise: (exercise) => set({ exercise }),
   setSessionStatus: (status) => set({ sessionStatus: status }),
   
-  setLiveTelemetry: (velocity, state) => {
-    const { espTimeout } = get();
-    if (espTimeout) clearTimeout(espTimeout);
-    
-    const newTimeout = setTimeout(() => {
-      set({ espConnectionStatus: 'disconnected', liveVelocity: 0 });
-    }, 3000);
+    // Mark ESP active for 6s after last heartbeat.
+    // Heartbeats arrive every 2s; 6s = 3× margin for HTTP round-trip jitter.
+    setLiveTelemetry: (velocity, state) => {
+      const { espTimeout } = get();
+      if (espTimeout) clearTimeout(espTimeout);
+      
+      const newTimeout = setTimeout(() => {
+        set({ espConnectionStatus: 'disconnected', liveVelocity: 0 });
+      }, 6000);
 
-    set({ 
-      liveVelocity: velocity, 
-      liveState: state,
-      espConnectionStatus: 'connected',
-      espTimeout: newTimeout
-    });
-  },
+      set({ 
+        liveVelocity: velocity, 
+        liveState: state,
+        espConnectionStatus: 'connected',
+        espTimeout: newTimeout
+      });
+    },
   
-  addRep: (rep, stats) => {
-    const { espTimeout, reps } = get();
-    if (espTimeout) clearTimeout(espTimeout);
-    
-    const newTimeout = setTimeout(() => {
-      set({ espConnectionStatus: 'disconnected', liveVelocity: 0 });
-    }, 3000);
+    addRep: (rep, stats) => {
+      const { espTimeout, reps } = get();
+      if (espTimeout) clearTimeout(espTimeout);
+      
+      const newTimeout = setTimeout(() => {
+        set({ espConnectionStatus: 'disconnected', liveVelocity: 0 });
+      }, 6000);
 
-    set({ 
-      reps: [...reps, rep],
-      projectedRpe: stats.projected_rpe,
-      velocityLossPct: stats.velocity_loss_pct,
-      latestRepProfile: rep.profile || [],
-      espConnectionStatus: 'connected',
-      espTimeout: newTimeout
-    });
-  },
+      set({ 
+        reps: [...reps, rep],
+        projectedRpe: stats.projected_rpe,
+        velocityLossPct: stats.velocity_loss_pct,
+        latestRepProfile: rep.profile || [],
+        espConnectionStatus: 'connected',
+        espTimeout: newTimeout
+      });
+    },
   
   resetSet: () => set({ reps: [], projectedRpe: 0, velocityLossPct: 0, insights: [], latestRepProfile: [] }),
   

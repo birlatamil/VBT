@@ -152,8 +152,10 @@ void broadcastEvent(const char* data) {
 }
 
 void webServerTask(void *pvParameters) {
+    // WiFi mode is already set to WIFI_AP_STA in setup().
+    // We only need to start the soft-AP here.
     Serial.println("[WIFI] Starting Access Point: Barbell_VBT");
-    WiFi.softAP("Barbell_VBT"); // Open network
+    WiFi.softAP("Barbell_VBT"); // Open network, no password
     Serial.print("[WIFI] Connect to AP and visit: http://");
     Serial.println(WiFi.softAPIP());
 
@@ -276,9 +278,6 @@ void setup() {
     Serial.println("[INIT] Initializing MPU6500 over SPI...");
     sensorOk = imu.begin();
 
-    // Initialize Cloud Connection (WiFi STA)
-    cloud.begin();
-
     if (!sensorOk) {
         Serial.println();
         Serial.println("========================================");
@@ -293,7 +292,6 @@ void setup() {
         Serial.println();
         Serial.println("[INIT] Entering error loop — reset to retry");
 
-        // Blink built-in LED to indicate error (if available)
         #ifdef LED_BUILTIN
         pinMode(LED_BUILTIN, OUTPUT);
         #endif
@@ -306,9 +304,23 @@ void setup() {
         }
     }
 
-    // Enable hardware watchdog
-    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
+    // ── WiFi: set mode ONCE here, before cloud.begin() ──────────────────
+    // WIFI_AP_STA lets the soft-AP (for the dashboard) and STA (for cloud)
+    // coexist on the same radio.  cloud.begin() must NOT call WiFi.mode().
+    WiFi.mode(WIFI_AP_STA);
+
+    // ── Watchdog: init BEFORE cloud.begin() with a generous timeout ──────
+    // cloud.begin() may block up to WIFI_CONNECT_TIMEOUT_MS (8 s) while
+    // trying to connect.  Use 15 s so the WDT doesn't fire during that window.
+    // After setup() the loop task resets the WDT every cycle (~10 ms).
+    esp_task_wdt_init(20, true);  // 20s: covers WiFi scan (~3s) + connect timeout (12s)
     esp_task_wdt_add(NULL);
+
+    // ── Initialize Cloud Connection (WiFi STA) ───────────────────────────
+    cloud.begin();
+
+    // ── Reduce WDT to operational timeout after WiFi attempt ────────────
+    esp_task_wdt_init(WATCHDOG_TIMEOUT_S, true);
 
     Serial.println();
     Serial.println("[INIT] Setup complete — streaming data at 100Hz");
@@ -334,11 +346,13 @@ void setup() {
         sharedMetrics.state = 0;
         sharedMetrics.peak_velocity = 0.0f;
 
-        // Spawn WebServer task on Core 0 (WebServerTask, 8KB stack, priority 1)
+        // Spawn WebServer task on Core 0
+        // Stack increased to 12 KB: mDNS + WebServer + SSE vector + String ops
+        // can easily overflow an 8 KB stack, causing silent crashes.
         xTaskCreatePinnedToCore(
             webServerTask,
             "WebServerTask",
-            8192,
+            12288,  // 12 KB — was 8 KB (too small for mDNS + SSE)
             NULL,
             1,
             NULL,
@@ -368,6 +382,39 @@ void loop() {
             }
         }
     }
+
+    uint32_t now = millis();
+
+    // ═════════════════════════════════════════════════════════════════════
+    // NETWORK & HEALTH TASKS (Runs independently of sensor interrupts)
+    // ═════════════════════════════════════════════════════════════════════
+    
+    // ─── Non-blocking WiFi reconnect (every 30s when disconnected) ──
+    cloud.reconnectIfNeeded();
+
+    // ─── Periodic Heartbeat for Cloud Dashboard (every 2s) ───────
+    static uint32_t lastHeartbeat = 0;
+    if (now - lastHeartbeat >= 2000) {
+        float current_vel = 0.0f;
+        int current_state = 0;
+        if (xSemaphoreTake(sharedMetricsMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+            current_vel = sharedMetrics.velocity;
+            current_state = sharedMetrics.state;
+            xSemaphoreGive(sharedMetricsMutex);
+        }
+        cloud.postHeartbeat(current_vel, current_state);
+        lastHeartbeat = now;
+    }
+
+    // ─── Periodic sensor health check ────────────────────────────
+    if (now - lastSensorCheck >= SENSOR_CHECK_MS) {
+        checkSensorHealth();
+        lastSensorCheck = now;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // SENSOR PROCESSING TASKS (Runs at 100Hz on interrupt)
+    // ═════════════════════════════════════════════════════════════════════
 
     // Wait for Data Ready interrupt from MPU6500
     if (!imu.isDataReady()) {
@@ -560,7 +607,6 @@ void loop() {
         sharedMetrics.peak_velocity = rep_engine.getLastRep().peak_velocity;
 
         // ─── Periodic statistics output ──────────────────────────────
-        uint32_t now = millis();
         if (now - lastStatsTime >= STATS_INTERVAL_MS) {
             printStats();
             sampleCount  = 0;
@@ -568,19 +614,6 @@ void loop() {
             maxDeltaTime = 0.0f;
             sumDeltaTime = 0.0f;
             lastStatsTime = now;
-        }
-
-        // ─── Periodic Heartbeat for Cloud Dashboard (every 2s) ───────
-        static uint32_t lastHeartbeat = 0;
-        if (now - lastHeartbeat >= 2000) {
-            cloud.postHeartbeat(velocity, (int)rep_engine.getState());
-            lastHeartbeat = now;
-        }
-
-        // ─── Periodic sensor health check ────────────────────────────
-        if (now - lastSensorCheck >= SENSOR_CHECK_MS) {
-            checkSensorHealth();
-            lastSensorCheck = now;
         }
 
         // Release the mutex
