@@ -8,7 +8,7 @@
 #include "rep_detector.h"
 
 // User: Configure your default backend URL here (update before flashing if needed)
-#define DEFAULT_BACKEND_URL "http://192.168.1.40:3001"
+#define DEFAULT_BACKEND_URL "https://vbt-n350.onrender.com"
 #define DEVICE_ID "esp32_001"
 
 class CloudClient {
@@ -47,7 +47,7 @@ public:
         Serial.print("[Cloud] Connecting to WiFi STA: ");
         Serial.println(ssid);
         
-        WiFi.mode(WIFI_STA);
+        WiFi.mode(WIFI_AP_STA); // AP_STA mode allows softAP and STA to coexist
         WiFi.disconnect();
         delay(100);
         WiFi.begin(ssid.c_str(), pass.c_str());
