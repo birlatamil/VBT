@@ -123,6 +123,8 @@ public:
         int httpResponseCode = http.POST(payload);
         if (httpResponseCode > 0) {
             String response = http.getString(); // drain buffer
+        } else {
+            Serial.printf("[Cloud] Heartbeat POST Error: %s\n", http.errorToString(httpResponseCode).c_str());
         }
         http.end();
     }
