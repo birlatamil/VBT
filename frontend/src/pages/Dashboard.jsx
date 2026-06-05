@@ -16,7 +16,7 @@ export function Dashboard() {
   const { projectedRpe, velocityLossPct, insights } = useSessionStore();
 
   return (
-    <div className="min-h-screen flex flex-col p-6 space-y-6">
+    <div className="h-full flex flex-col p-4 sm:p-6 space-y-4 sm:space-y-6">
       
       {/* Header Area */}
       <header className="flex flex-col md:flex-row justify-between items-center glass-card p-4 space-y-4 md:space-y-0">

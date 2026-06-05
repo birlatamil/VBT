@@ -20,12 +20,12 @@ export function History() {
   }, []);
 
   return (
-    <div className="min-h-screen p-6 space-y-6">
-      <header className="flex justify-between items-center glass-card p-4">
+    <div className="h-full flex flex-col p-4 sm:p-6 space-y-4 sm:space-y-6">
+      <header className="flex-shrink-0 flex justify-between items-center glass-card p-4">
         <h1 className="text-2xl font-bold text-gradient">Session History</h1>
       </header>
 
-      <main className="glass-card p-6 min-h-[500px]">
+      <main className="flex-1 glass-card p-4 sm:p-6 overflow-y-auto custom-scrollbar">
         {loading ? (
           <div className="text-gray-400">Loading history...</div>
         ) : sessions.length === 0 ? (

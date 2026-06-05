@@ -6,7 +6,7 @@ function App() {
   const [currentTab, setCurrentTab] = useState('dashboard');
 
   return (
-    <div className="relative min-h-screen bg-background">
+    <div className="relative h-[100dvh] w-full overflow-hidden">
       {/* Navigation Layer */}
       <div className="absolute top-0 left-0 right-0 z-50 p-4 pointer-events-none">
         <div className="max-w-xs mx-auto glass-card flex p-1 pointer-events-auto shadow-2xl">
@@ -26,7 +26,7 @@ function App() {
       </div>
       
       {/* Route Content with top padding for navbar */}
-      <div className="pt-12 min-h-screen">
+      <div className="pt-16 h-full w-full">
         {currentTab === 'dashboard' ? <Dashboard /> : <History />}
       </div>
     </div>
